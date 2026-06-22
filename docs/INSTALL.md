@@ -6,11 +6,20 @@ dependencies — `better-sqlite3` (embedded SQLite, with a native addon) and
 
 ## Requirements
 
-- **Node.js >= 20** and npm (npm ships with Node).
-- A C toolchain for the `better-sqlite3` native build:
+- **Node.js 20–26** and npm (npm ships with Node). CI covers Node 20, 22, 24, and 26 on Linux and macOS.
+- **No C toolchain needed for the common case.** `better-sqlite3` (>= 12) ships
+  prebuilt binaries for macOS (arm64/x64) and Linux (arm64/x64) on supported Node
+  versions, and `sqlite-vec` is distributed as a prebuilt extension — so a normal
+  `npm install` does not compile anything.
+- A C toolchain is only needed as a **fallback** if no prebuilt binary matches your
+  platform/Node combo:
   - **macOS:** Xcode Command Line Tools (`xcode-select --install`).
   - **Linux:** `build-essential` + `python3` (e.g. `apt install build-essential python3`).
   - **Windows:** the windows-build-tools / Visual Studio C++ workload.
+
+> Note: pin `better-sqlite3` to a release that supports your Node version. Versions
+> < 12 predate Node 26 and will fall back to a native compile (and may fail) on
+> newer Node. STRATUS pins `^12.11.1` for this reason.
 
 No external service is required to install or smoke-test. Embeddings are
 optional and only contacted at runtime if you configure an embedder endpoint.
