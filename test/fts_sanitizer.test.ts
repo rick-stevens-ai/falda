@@ -8,10 +8,10 @@ const blobDir = fs.mkdtempSync(path.join(os.tmpdir(), "stratus-fts-"));
 const s = new Stratus({ dbPath: ":memory:", blobDir, embed: makeLocalEmbedder(768), dim: 768 });
 async function main() {
   await s.addStream("t", [
-    { role: "user", content: "memory system dual run between TDAI and STRATUS" },
+    { role: "user", content: "memory system dual run between SOURCE and STRATUS" },
     { role: "assistant", content: "the distiller promotes atoms and scenes" },
   ]);
-  const probes = ["memory system dual run","TDAI AND STRATUS",'distiller "scenes"',"atoms-and-scenes (promote)","OR NOT *",""];
+  const probes = ["memory system dual run","SOURCE AND STRATUS",'distiller "scenes"',"atoms-and-scenes (promote)","OR NOT *",""];
   let fails = 0;
   for (const q of probes) {
     try { const r = await s.searchStream(q, 3); console.log("OK   [" + q + "] -> " + r.length + " hits"); }

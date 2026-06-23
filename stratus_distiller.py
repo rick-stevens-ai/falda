@@ -6,17 +6,17 @@ STRATUS ships storage primitives (addStream / upsertAtom / writeScene / writeCor
 but NO process that promotes T0 stream -> T1 atoms -> T2 scenes -> T3 core.
 The shadow tap mirrors raw turns into T0 only, so without this the dual-run
 validates CAPTURE but not DISTILLATION. This sidecar runs the promotion loop,
-mirroring TDAI's L0->L1->L2->L3 cadence.
+mirroring a standard L0->L1->L2->L3 distillation cadence.
 
 Design constraints:
   - Sidecar only. Calls the documented STRATUS HTTP API (:8077) + Argo. Never
     edits the STRATUS TS repo (that is Ollie's maintenance lane) and never
-    touches TDAI. Fully reversible: stop the process, the dual-run reverts to
+    touches the authoritative source store. Fully reversible: stop the process, the dual-run reverts to
     capture-only.
   - STRATUS stays SHADOW: distilled atoms/scenes/core live in STRATUS's own DB,
     never injected into the agent loop. A bug here cannot degrade either agent.
 
-Tiers / cadence (mirrors TDAI):
+Tiers / cadence:
   T0->T1  every L1_EVERY_N new stream turns -> LLM extracts typed atoms
           (persona / episodic / instruction), upserted via /atoms/upsert.
   T1->T2  every L2_INTERVAL_S, synthesize recent atoms into a dated scene block
@@ -184,7 +184,7 @@ def run_l1(state):
         return 0
     # Chunk into small windows so substantive turns get their own extraction pass
     # instead of being diluted inside one giant transcript (which makes the model
-    # under-extract). Mirrors TDAI's every-N-conversations cadence.
+    # under-extract). Standard every-N-conversations distillation cadence.
     total_made = 0
     n = L1_CHUNK_TURNS
     for i in range(0, len(new), n):
