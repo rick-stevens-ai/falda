@@ -115,33 +115,80 @@ asymmetry that looks like a bug. Make every send do both legs.
 
 ## 2. OpenClaw harness
 
-> **OpenClaw maintainer: please fill in.** Stubbed by the Hermes side; the
-> OpenClaw integration specifics (process model, memory-hook location, plugin
-> vs. native, runtime dir conventions) should be authored by whoever runs the
-> OpenClaw deployment.
-
-Expected shape, by analogy to the Hermes side:
+OpenClaw is a Node.js agent gateway (port 3000) with a plugin/skill layer,
+cron scheduler, and a pluggable memory provider surface. The deployment runs
+on the same host as the STRATUS gateway (CherryRd, macOS).
 
 ### 2a. Shadow capture
-- [ ] Gateway: same `bin/stratus serve` / `npm run gateway`, own
-  `STRATUS_ROOT`/`STRATUS_PORT` on the OpenClaw host (or shared via tailnet +
-  a pool).
-- [ ] Tap: point `stratus_tap.py` (or an OpenClaw-native equivalent) at
-  OpenClaw's L0 conversation export. Document `SOURCE_CONV_DIR` for OpenClaw.
-- [ ] Process manager: launchd/systemd label(s) used.
+
+- **Gateway**: `bin/stratus serve` / `npm run gateway` already running on
+  CherryRd at `localhost:8077` under launchd label
+  `com.stevens.stratus-gateway` (`KeepAlive=true`).
+
+- **Tap**: `integrations/external-source/stratus_tap.py` points at
+  OpenClaw's L0 session-log export directory:
+
+  ```
+  SOURCE_CONV_DIR=~/.openclaw/sessions   # top-level session JSONL dir
+  STRATUS_URL=http://127.0.0.1:8077
+  STRATUS_TENANT=openclaw
+  ```
+
+  The tap tails any `*.jsonl` files in that tree, forwarding new turns to
+  `/stream/add` with `{tenant: "openclaw"}`. Byte-offset checkpoint is
+  stored at `~/.stratus/tap-checkpoint-openclaw.json`.
+
+- **Process manager**: launchd label `com.stevens.stratus-tap-openclaw`
+  (`KeepAlive=true`). Plist at
+  `~/Library/LaunchAgents/com.stevens.stratus-tap-openclaw.plist`.
 
 ### 2b. Live memory provider
-- [ ] Where OpenClaw's memory read/write hooks live and how they'd call the
-  STRATUS HTTP surface.
-- [ ] Tenant id used for the OpenClaw agent.
+
+OpenClaw exposes a memory-provider plugin interface. The STRATUS provider
+calls the same HTTP surface the Hermes side uses:
+
+- **Write** (after each turn): `POST /stream/add` with
+  `{tenant: "openclaw", turn: {role, content, ts}}`.
+- **Read/recall**: `GET /stream/search?q=...&tenant=openclaw` +
+  `GET /atoms/search?q=...&tenant=openclaw`.
+- **Core/persona**: `GET /core/read?tenant=openclaw` on startup.
+- **Distilled facts**: `POST /atoms/upsert` as the distillation sidecar
+  promotes T0→T1→T2→T3.
+- **Tenant id**: `openclaw` (private `self` store; no pool unless sharing
+  with Hermes — see §3).
+
+The provider plugin lives at
+`~/.openclaw/plugins/stratus-memory/index.js` (loaded via
+`plugins.stratus-memory` in Gateway config). Gateway runs STRATUS in shadow
+mode by default; flip `memory.provider: stratus` in config to go live.
 
 ### 2c. Cross-agent messaging
-- [ ] OpenClaw-side subscriber/bridge that consumes `<bus>.<agent>.inbox` +
-  broadcast.
-- [ ] Python/runtime version used (confirm modern interpreter so no isoformat
-  shim is needed, or note the shim).
-- [ ] Send path: confirm it does BOTH the durable-file leg and the broker
-  publish leg (the symmetry rule above).
+
+- **Subscriber**: `~/.hermes/nats-subscriber.py` (shared script, one
+  instance per agent identity). Consumes `stratus.openclaw.inbox` +
+  `stratus.broadcast` from the JetStream durable and bridges non-noise
+  traffic into the file mailbox:
+  `~/Dropbox/XFER/kukla-ollie/kukla-background-queue.jsonl`.
+  The OpenClaw Gateway background-hook process polls that JSONL for
+  inbound Kukla messages (the `kukla:background` hook, routed by
+  `ingress:kukla-background`).
+
+- **Python/runtime**: **Python 3.13** (`~/.hermes/venvs/sibline/bin/python3.13`,
+  Homebrew). `nats-py 2.15.0` installed in that venv. No isoformat shim
+  needed — 3.11+ `datetime.fromisoformat()` handles N-digit microseconds
+  natively. (The shim in `nats-subscriber.py` is gated
+  `if sys.version_info < (3, 11)` and is a no-op on this deployment.)
+
+- **Send path** (symmetric — both legs every send):
+  1. **Durable file leg first**: `sibline-send.py` appends the message
+     envelope to
+     `~/Dropbox/XFER/kukla-ollie/kukla-background-queue.jsonl` atomically.
+  2. **Broker leg**: publishes to `stratus.hermes.inbox` on NATS
+     best-effort. Broker outage degrades to file-only delivery; no message
+     loss.
+  Outbound from OpenClaw also has a signed-webhook path
+  (`kukla_webhook_post.sh`, HMAC-SHA256) for out-of-band delivery when the
+  shared Dropbox dir is the authoritative channel (e.g. this integration).
 
 ---
 
