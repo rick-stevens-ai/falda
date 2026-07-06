@@ -9,3 +9,6 @@ example.db*
 *.log
 .DS_Store
 __pycache__/
+falda-data/
+*.bak-premerge-*
+*.tenant-aware.py
