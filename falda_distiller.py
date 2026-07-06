@@ -31,14 +31,21 @@ import json, os, sys, time, hashlib, urllib.request, urllib.error
 from datetime import datetime, timezone
 
 HOME      = os.path.expanduser("~")
-FALDA   = os.environ.get("FALDA_URL", "http://localhost:8077")
+FALDA   = os.environ.get("FALDA_URL", "http://localhost:8078")
+# Multi-tenant addressing: every gateway call is scoped to this tenant. The
+# distiller only ever touches ONE tenant's store per process — run a separate
+# instance per tenant. Defaults to "default" for backward compatibility.
+FALDA_TENANT = os.environ.get("FALDA_TENANT", "default")
+FALDA_POOL   = os.environ.get("FALDA_POOL", "")  # empty = private "self" store
 # Any OpenAI-compatible chat-completions endpoint. Point at your own proxy.
 ARGO_URL  = os.environ.get("LLM_BASE_URL") or os.environ.get("ARGO_BASE_URL", "http://localhost:8000/v1")
 # Required: no default. Set LLM_API_KEY (or ARGO_API_KEY) in the environment.
 ARGO_KEY  = os.environ.get("LLM_API_KEY") or os.environ.get("ARGO_API_KEY", "")
 ARGO_MODEL= os.environ.get("DISTILLER_MODEL", "gpt-4o-mini")
-STATE     = os.path.join(HOME, ".falda", "distiller_state.json")
-LOG       = os.path.join(HOME, ".falda", "distiller.log")
+# Per-tenant checkpoint so multiple distiller instances don't clobber each other.
+_state_suffix = "" if FALDA_TENANT == "default" else f"-{FALDA_TENANT}"
+STATE     = os.path.join(HOME, ".falda", f"distiller_state{_state_suffix}.json")
+LOG       = os.path.join(HOME, ".falda", f"distiller{_state_suffix}.log")
 
 L1_EVERY_N    = int(os.environ.get("L1_EVERY_N", "10"))      # new turns -> trigger atom extraction
 L2_INTERVAL_S = int(os.environ.get("L2_INTERVAL_S", "3600")) # scene synthesis cadence
@@ -68,7 +75,15 @@ def http_json(url, payload, headers=None, timeout=120):
 
 
 def falda(route, payload):
-    return http_json(f"{FALDA}{route}", payload)
+    # Thread multi-tenant addressing into every gateway call so this distiller
+    # only ever reads/writes the tenant it is scoped to. Without this the
+    # gateway falls back to FALDA_DEFAULT_TENANT and the distiller would
+    # silently operate on the wrong store.
+    p = dict(payload)
+    p.setdefault("tenant", FALDA_TENANT)
+    if FALDA_POOL:
+        p.setdefault("pool", FALDA_POOL)
+    return http_json(f"{FALDA}{route}", p)
 
 
 def argo_chat(system, user, max_tokens=2000, timeout=180):
@@ -278,7 +293,8 @@ def run_l3(state):
 
 
 def loop():
-    log(f"distiller start: falda={FALDA} model={ARGO_MODEL} "
+    log(f"distiller start: falda={FALDA} tenant={FALDA_TENANT}"
+        f"{('/'+FALDA_POOL) if FALDA_POOL else ''} model={ARGO_MODEL} "
         f"L1_EVERY_N={L1_EVERY_N} L2={L2_INTERVAL_S}s L3={L3_INTERVAL_S}s poll={POLL_S}s")
     while True:
         s = load_state()
