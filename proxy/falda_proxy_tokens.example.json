@@ -1,0 +1,15 @@
+{
+  "upstream": "http://100.87.221.1:8078",
+  "tokens": {
+    "REPLACE_WITH_openssl_rand_hex_24": {
+      "tenant": "crush",
+      "pools": ["external-demo"],
+      "label": "Crush (Brian Spears' agent) — demo only"
+    },
+    "REPLACE_WITH_ANOTHER_openssl_rand_hex_24": {
+      "tenant": "somm",
+      "pools": ["external-demo"],
+      "label": "Somm (Court Corley's agent) — demo only"
+    }
+  }
+}
