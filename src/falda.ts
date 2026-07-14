@@ -188,7 +188,15 @@ export class Falda {
   deleteAtoms(ids: string[]): number {
     let n = 0;
     const del = this.db.prepare("DELETE FROM atoms WHERE id=?");
-    for (const id of ids) n += del.run(id).changes;
+    const delFts = this.db.prepare("DELETE FROM atoms_fts WHERE id=?");
+    const delVec = this.db.prepare("DELETE FROM atoms_vec WHERE id=?");
+    for (const id of ids) {
+      n += del.run(id).changes;
+      // Also purge the shadow index rows, else orphaned embeddings/FTS entries
+      // leak into future hybrid recall and hydrate as null.
+      delFts.run(id);
+      delVec.run(id);
+    }
     return n;
   }
 

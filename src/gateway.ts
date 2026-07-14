@@ -41,6 +41,11 @@ import { PoolManager, PoolError } from "./pools.js";
 import { makeEmbedder, makeLocalEmbedder } from "./embedder.js";
 
 const PORT = Number(process.env.FALDA_PORT ?? 8077);
+// Bind loopback by default. The gateway has no inbound auth (tenant is read from
+// the request body), so binding all interfaces would let any reachable caller
+// name any tenant. Opt into a wider bind explicitly via FALDA_HOST=0.0.0.0, and
+// only behind an authenticating front-end.
+const HOST = process.env.FALDA_HOST ?? "127.0.0.1";
 const DIM = Number(process.env.FALDA_DIM ?? 768);
 const ROOT = process.env.FALDA_ROOT ?? "./falda-data";
 const DEFAULT_TENANT = process.env.FALDA_DEFAULT_TENANT ?? "default";
@@ -171,4 +176,4 @@ createServer((req, res) => {
       res.end(JSON.stringify({ error: String(e?.message ?? e) }));
     }
   });
-}).listen(PORT, () => console.log(`FALDA gateway listening on :${PORT} (root=${ROOT}, default-tenant=${DEFAULT_TENANT})`));
+}).listen(PORT, HOST, () => console.log(`FALDA gateway listening on ${HOST}:${PORT} (root=${ROOT}, default-tenant=${DEFAULT_TENANT})`));
