@@ -68,9 +68,12 @@ TOKEN=<issued-token>
 POOL=external-demo
 
 # write an atom (synchronous, immediately searchable)
+# NOTE: the field is `content` (NOT `text`). The gateway's /atoms/upsert schema is
+#   {id?, type?, content, background?}. Sending `text` leaves content undefined and
+#   the embed call fails with `embeddings 422: Field required body.input`.
 curl -sk $BASE/atoms/upsert -H "Authorization: Bearer $TOKEN" \
   -H 'content-type: application/json' \
-  -d "{\"pool\":\"$POOL\",\"text\":\"hello from the demo agent\",\"type\":\"episodic\"}"
+  -d "{\"pool\":\"$POOL\",\"content\":\"hello from the demo agent\",\"type\":\"episodic\"}"
 
 # semantic search
 curl -sk $BASE/atoms/search -H "Authorization: Bearer $TOKEN" \
