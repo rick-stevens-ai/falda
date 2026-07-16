@@ -32,9 +32,9 @@ Runs on a public VPS that is also on our tailnet (e.g. `chicago-2`,
 2. **Bearer-token auth** — unknown/missing token → `401`.
 3. **Tenant clamp** — the caller's `tenant` field is discarded and replaced with
    the tenant bound to their token. Impersonation is impossible.
-4. **Route allowlist** — only `/stream/add`, `/atoms/search`, `/atoms/query`,
-   `/pools/mine`, `/health`. Pool admin (`/pools/declare`, `/pools/grant`) stays
-   internal-only.
+4. **Route allowlist** — only `/stream/add`, `/stream/search`, `/atoms/upsert`,
+   `/atoms/search`, `/atoms/query`, `/pools/mine`, `/health`. Pool admin
+   (`/pools/declare`, `/pools/grant`) and core/scenes stay internal-only.
 5. **Pool allowlist per token** — a token may address only `self` or pools in
    its allowed set.
 
