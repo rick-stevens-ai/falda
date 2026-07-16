@@ -6,8 +6,14 @@ a cross-agent write/read. Verified end-to-end 2026-07-16.
 ## Endpoint
 
 ```
-https://103.101.203.226:8444
+https://103.101.203.226         (port 443 — use this if your network blocks high ports)
+https://103.101.203.226:8444    (original port — equivalent, same tokens/data)
 ```
+
+Both ports front the **same** proxy, tokens, and pool data — pick whichever your
+egress firewall allows. Many corporate/lab networks (e.g. PNNL) permit outbound
+443 (HTTPS) but drop arbitrary high ports like 8444; if `:8444` hangs on TCP
+connect, try plain `:443`.
 
 - TLS is **self-signed** — use `curl -k` (or pin the cert fingerprint we sent
   out of band). This is the same self-signed posture as the CELS model
