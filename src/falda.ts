@@ -79,6 +79,15 @@ export class Falda {
     this.initSchema();
   }
 
+  /** sqlite-vec float[N] columns require the vector as a raw float32 Buffer.
+   *  better-sqlite3@12 no longer accepts a bare Float32Array as a bind param
+   *  (throws "SQLite3 can only bind numbers, strings, bigints, buffers, and null"),
+   *  so encode to a Buffer over the Float32Array's backing bytes. */
+  private vecBuf(a: number[]): Buffer {
+    const f = new Float32Array(a);
+    return Buffer.from(f.buffer, f.byteOffset, f.byteLength);
+  }
+
   private initSchema() {
     const d = this.dim;
     this.db.exec(`
@@ -113,7 +122,7 @@ export class Falda {
       const ts = m.timestamp ?? new Date().toISOString();
       ins.run(id, sessionId, m.role, m.content, ts);
       insF.run(m.content, id);
-      insV.run(id, new Float32Array(await this.embed(m.content)) as any);
+      insV.run(id, this.vecBuf(await this.embed(m.content)));
       ids.push(id);
     }
     return ids;
@@ -148,24 +157,32 @@ export class Falda {
   }
 
   // ─── T1 Atoms ─────────────────────────────────────────────────────────────
-  async upsertAtom(a: { id?: string; type?: string; content: string; background?: string }): Promise<Atom> {
+  async upsertAtom(a: { id?: string; type?: string; content: string; background?: unknown }): Promise<Atom> {
     const now = new Date().toISOString();
     const id = a.id ?? randomUUID();
+    // Coerce background to a bindable value: SQLite only accepts
+    // number/string/bigint/buffer/null. Callers sometimes send booleans,
+    // numbers, or objects; normalize so a stray type can't throw a 500.
+    const bg: string | null =
+      a.background == null ? null
+      : typeof a.background === "string" ? a.background
+      : typeof a.background === "object" ? JSON.stringify(a.background)
+      : String(a.background);
     const exists = this.db.prepare("SELECT created_at FROM atoms WHERE id=?").get(id) as any;
     const created = exists?.created_at ?? now;
     if (exists) {
       this.db.prepare("UPDATE atoms SET type=?,content=?,background=?,updated_at=? WHERE id=?")
-        .run(a.type ?? "fact", a.content, a.background ?? null, now, id);
+        .run(a.type ?? "fact", a.content, bg, now, id);
       this.db.prepare("DELETE FROM atoms_fts WHERE id=?").run(id);
       this.db.prepare("DELETE FROM atoms_vec WHERE id=?").run(id);
     } else {
       this.db.prepare("INSERT INTO atoms(id,type,content,background,created_at,updated_at) VALUES(?,?,?,?,?,?)")
-        .run(id, a.type ?? "fact", a.content, a.background ?? null, created, now);
+        .run(id, a.type ?? "fact", a.content, bg, created, now);
     }
     this.db.prepare("INSERT INTO atoms_fts(content,id) VALUES(?,?)").run(a.content, id);
     this.db.prepare("INSERT INTO atoms_vec(id,embedding) VALUES(?,?)")
-      .run(id, new Float32Array(await this.embed(a.content)) as any);
-    return { id, type: a.type ?? "fact", content: a.content, background: a.background ?? null, created_at: created, updated_at: now };
+      .run(id, this.vecBuf(await this.embed(a.content)));
+    return { id, type: a.type ?? "fact", content: a.content, background: bg, created_at: created, updated_at: now };
   }
 
   queryAtoms(p: { type?: string; limit?: number; offset?: number; time_start?: string; time_end?: string } = {}) {
@@ -239,10 +256,10 @@ export class Falda {
 
   // ─── Hybrid recall: dense (sqlite-vec) + lexical (FTS5 BM25), RRF-fused ────
   private async hybrid(kind: "stream" | "atoms", query: string, limit: number) {
-    const qvec = new Float32Array(await this.embed(query));
+    const qvec = this.vecBuf(await this.embed(query));
     const vecRows = this.db.prepare(
       `SELECT id, distance FROM ${kind}_vec WHERE embedding MATCH ? ORDER BY distance LIMIT ?`
-    ).all(qvec as any, limit * 2) as Array<{ id: string }>;
+    ).all(qvec, limit * 2) as Array<{ id: string }>;
     const ftsRows = this.db.prepare(
       `SELECT id, bm25(${kind}_fts) AS rank FROM ${kind}_fts WHERE ${kind}_fts MATCH ? ORDER BY rank LIMIT ?`
     ).all(toFtsQuery(query), limit * 2) as Array<{ id: string }>;
