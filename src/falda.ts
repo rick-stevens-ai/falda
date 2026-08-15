@@ -276,5 +276,58 @@ export class Falda {
     });
   }
 
+  /**
+   * Rebuild the dense-vector indexes at the current `this.dim`. The vec0
+   * dimension is baked into the table schema, so a dimension change cannot be
+   * done as a row-level rewrite — the *_vec tables must be dropped and
+   * recreated. The source-of-truth tables (stream, atoms) are never touched,
+   * so no content is lost even if the run is interrupted.
+   *
+   * MUST be run with the gateway (and any other writer) stopped: this holds no
+   * application-level lock across the multi-statement rebuild, so a concurrent
+   * write could be dropped from the rebuilt vector index (the row still lands
+   * in stream/atoms and gets a vector on the next reembed or upsert).
+   *
+   * Backported from rbross-hpc/falda (src/falda.ts reembedAll), adapted to our
+   * 2-tier (stream + atoms) schema — the fork also rebuilds a scenes tier we
+   * do not have.
+   */
+  async reembedAll(
+    onProgress?: (tier: "stream" | "atoms", done: number, total: number) => void
+  ): Promise<{ stream: number; atoms: number; dim: number }> {
+    const d = this.dim;
+    const counts = { stream: 0, atoms: 0, dim: d };
+
+    // stream
+    {
+      const rows = this.db.prepare("SELECT id, content FROM stream").all() as { id: string; content: string }[];
+      this.db.exec("DROP TABLE IF EXISTS stream_vec;");
+      this.db.exec(`CREATE VIRTUAL TABLE stream_vec USING vec0(id TEXT PRIMARY KEY, embedding float[${d}]);`);
+      const ins = this.db.prepare("INSERT INTO stream_vec(id,embedding) VALUES(?,?)");
+      let i = 0;
+      for (const r of rows) {
+        ins.run(r.id, this.vecBuf(await this.embed(r.content)));
+        counts.stream = ++i;
+        onProgress?.("stream", i, rows.length);
+      }
+    }
+
+    // atoms
+    {
+      const rows = this.db.prepare("SELECT id, content FROM atoms").all() as { id: string; content: string }[];
+      this.db.exec("DROP TABLE IF EXISTS atoms_vec;");
+      this.db.exec(`CREATE VIRTUAL TABLE atoms_vec USING vec0(id TEXT PRIMARY KEY, embedding float[${d}]);`);
+      const ins = this.db.prepare("INSERT INTO atoms_vec(id,embedding) VALUES(?,?)");
+      let i = 0;
+      for (const r of rows) {
+        ins.run(r.id, this.vecBuf(await this.embed(r.content)));
+        counts.atoms = ++i;
+        onProgress?.("atoms", i, rows.length);
+      }
+    }
+
+    return counts;
+  }
+
   close() { this.db.close(); }
 }

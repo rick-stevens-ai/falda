@@ -6,6 +6,9 @@
 #   falda serve            Start the HTTP gateway (uses built dist/ if present,
 #                            else falls back to tsx on the TypeScript source).
 #   falda smoke            Run the offline smoke test.
+#   falda reembed          Rebuild dense-vector indexes after an embedding
+#                            model/dim change (run with the gateway stopped).
+#   falda stats            Offline, read-only deployment report.
 #   falda build            Compile TypeScript -> dist/.
 #   falda health [PORT]    Curl the gateway /healthz endpoint.
 #   falda version          Print the package version.
@@ -33,7 +36,7 @@ cd "$ROOT"
 
 PORT="${FALDA_PORT:-8077}"
 
-usage() { sed -n '3,24p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '3,27p' "$0" | sed 's/^# \{0,1\}//'; }
 
 run_node_or_tsx() {
   # $1 = dist target (relative), $2 = src target (relative)
@@ -56,6 +59,18 @@ case "$cmd" in
     ;;
   smoke)
     exec npm run --silent smoke
+    ;;
+  reembed)
+    # Rebuild dense-vector indexes after an embedding model/dim change.
+    if [ -f "dist/reembed.js" ]; then exec node "dist/reembed.js" "$@"
+    elif command -v npx >/dev/null 2>&1; then exec npx --yes tsx "src/reembed.ts" "$@"
+    else echo "falda: no build and tsx unavailable. Run: falda build" >&2; exit 1; fi
+    ;;
+  stats)
+    # Offline, read-only deployment report.
+    if [ -f "dist/stats.js" ]; then exec node "dist/stats.js" "$@"
+    elif command -v npx >/dev/null 2>&1; then exec npx --yes tsx "src/stats.ts" "$@"
+    else echo "falda: no build and tsx unavailable. Run: falda build" >&2; exit 1; fi
     ;;
   build)
     exec npm run --silent build
