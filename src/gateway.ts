@@ -85,7 +85,51 @@ function enforceEmbeddingLock() {
   }
   console.log(`FALDA embedding lock: OK model=${model} dim=${DIM}`);
 }
+
+// Boot-time embedder probe (backported from rbross-hpc/falda src/boot.ts):
+// call the configured embedder once and assert the returned vector length ==
+// DIM. The manifest lock only compares env strings; this catches a remote
+// endpoint that is down, or silently serving a different model/dim than
+// FALDA_EMBED_MODEL claims — the exact failure class that produces HTTP 500s
+// on the first real write instead of a clear boot error.
+//
+//   FALDA_EMBED_STRICT=1  -> a probe failure (or an accidentally-unset remote
+//                            embedder falling back to the local fake) is a
+//                            boot FATAL instead of a warning.
+async function probeEmbedder() {
+  const strict = process.env.FALDA_EMBED_STRICT === "1";
+  const mode = (process.env.FALDA_EMBED ?? "").toLowerCase();
+  const hasRemote = !!process.env.FALDA_EMBED_BASE_URL;
+  const isRemote = mode === "remote" || (mode !== "local" && hasRemote);
+
+  // In strict mode, refuse to silently downgrade to the offline fake embedder.
+  if (strict && !isRemote) {
+    console.error("FATAL: FALDA_EMBED_STRICT=1 but no remote embedder configured " +
+      "(set FALDA_EMBED_BASE_URL and FALDA_EMBED=remote). Refusing to boot on the local fake embedder.");
+    process.exit(1);
+  }
+  if (!isRemote) return; // local embedder is deterministic; nothing to probe
+
+  try {
+    const embed = selectEmbedder();
+    const v = await embed("falda embedder boot probe");
+    if (!Array.isArray(v) || v.length !== DIM) {
+      const msg = `FALDA embedder probe: endpoint returned dim ${Array.isArray(v) ? v.length : "?"} != FALDA_DIM ${DIM}. ` +
+        `The embedder is serving a different model/dim than configured — recall/writes would corrupt.`;
+      if (strict) { console.error("FATAL: " + msg); process.exit(1); }
+      console.warn("WARN: " + msg + " (set FALDA_EMBED_STRICT=1 to make this fatal)");
+      return;
+    }
+    console.log(`FALDA embedder probe: OK (endpoint returned dim ${v.length})`);
+  } catch (e: any) {
+    const msg = `FALDA embedder probe: endpoint unreachable (${e?.message ?? e}).`;
+    if (strict) { console.error("FATAL: " + msg); process.exit(1); }
+    console.warn("WARN: " + msg + " (set FALDA_EMBED_STRICT=1 to make this fatal)");
+  }
+}
+
 enforceEmbeddingLock();
+await probeEmbedder();
 
 const pools = new PoolManager({ root: ROOT, embed: selectEmbedder(), dim: DIM });
 
