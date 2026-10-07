@@ -41,6 +41,7 @@ import { PoolManager, PoolError } from "./pools.js";
 import { makeEmbedder, makeLocalEmbedder } from "./embedder.js";
 
 const PORT = Number(process.env.FALDA_PORT ?? 8077);
+const BIND_HOST = process.env.FALDA_BIND_HOST ?? "0.0.0.0";
 const DIM = Number(process.env.FALDA_DIM ?? 768);
 const ROOT = process.env.FALDA_ROOT ?? "./falda-data";
 const DEFAULT_TENANT = process.env.FALDA_DEFAULT_TENANT ?? "default";
@@ -177,4 +178,4 @@ createServer((req, res) => {
       res.end(JSON.stringify({ error: String(e?.message ?? e) }));
     }
   });
-}).listen(PORT, () => console.log(`FALDA gateway listening on :${PORT} (root=${ROOT}, default-tenant=${DEFAULT_TENANT})`));
+}).listen(PORT, BIND_HOST, () => console.log(`FALDA gateway listening on ${BIND_HOST}:${PORT} (root=${ROOT}, default-tenant=${DEFAULT_TENANT})`));

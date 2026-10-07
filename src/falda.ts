@@ -77,6 +77,7 @@ export class Falda {
     sqliteVec.load(this.db);
     this.db.pragma("journal_mode = WAL");
     this.initSchema();
+    this.repairOrphanIndexes();
   }
 
   /** sqlite-vec float[N] columns require the vector as a raw float32 Buffer.
@@ -111,21 +112,37 @@ export class Falda {
     `);
   }
 
+  /** Remove auxiliary rows left by releases that deleted only base rows. */
+  private repairOrphanIndexes() {
+    this.db.transaction(() => {
+      this.db.prepare("DELETE FROM stream_fts WHERE id NOT IN (SELECT id FROM stream)").run();
+      this.db.prepare("DELETE FROM stream_vec WHERE id NOT IN (SELECT id FROM stream)").run();
+      this.db.prepare("DELETE FROM atoms_fts WHERE id NOT IN (SELECT id FROM atoms)").run();
+      this.db.prepare("DELETE FROM atoms_vec WHERE id NOT IN (SELECT id FROM atoms)").run();
+    })();
+  }
+
   // ─── T0 Stream ────────────────────────────────────────────────────────────
   async addStream(sessionId: string, items: StreamItem[]): Promise<string[]> {
-    const ids: string[] = [];
+    const prepared = [] as Array<{ id: string; role: string; content: string; ts: string; embedding: Buffer }>;
+    for (const m of items) {
+      prepared.push({
+        id: m.id ?? randomUUID(), role: m.role, content: m.content,
+        ts: m.timestamp ?? new Date().toISOString(),
+        embedding: this.vecBuf(await this.embed(m.content)),
+      });
+    }
     const ins = this.db.prepare("INSERT INTO stream(id,session_id,role,content,ts) VALUES(?,?,?,?,?)");
     const insF = this.db.prepare("INSERT INTO stream_fts(content,id) VALUES(?,?)");
     const insV = this.db.prepare("INSERT INTO stream_vec(id,embedding) VALUES(?,?)");
-    for (const m of items) {
-      const id = m.id ?? randomUUID();
-      const ts = m.timestamp ?? new Date().toISOString();
-      ins.run(id, sessionId, m.role, m.content, ts);
-      insF.run(m.content, id);
-      insV.run(id, this.vecBuf(await this.embed(m.content)));
-      ids.push(id);
-    }
-    return ids;
+    this.db.transaction(() => {
+      for (const m of prepared) {
+        ins.run(m.id, sessionId, m.role, m.content, m.ts);
+        insF.run(m.content, m.id);
+        insV.run(m.id, m.embedding);
+      }
+    })();
+    return prepared.map((m) => m.id);
   }
 
   queryStream(p: { session_id?: string; limit?: number; offset?: number; time_start?: string; time_end?: string } = {}) {
@@ -146,14 +163,21 @@ export class Falda {
   }
 
   deleteStream(p: { ids?: string[]; session_id?: string }): number {
-    let n = 0;
-    if (p.ids?.length) {
-      const del = this.db.prepare("DELETE FROM stream WHERE id=?");
-      for (const id of p.ids) n += del.run(id).changes;
-    } else if (p.session_id) {
-      n = this.db.prepare("DELETE FROM stream WHERE session_id=?").run(p.session_id).changes;
+    let ids = [...new Set(p.ids ?? [])];
+    if (!ids.length && p.session_id) {
+      ids = (this.db.prepare("SELECT id FROM stream WHERE session_id=?").all(p.session_id) as Array<{ id: string }>).map((r) => r.id);
     }
-    return n;
+    if (!ids.length) return 0;
+    const delBase = this.db.prepare("DELETE FROM stream WHERE id=?");
+    const delFts = this.db.prepare("DELETE FROM stream_fts WHERE id=?");
+    const delVec = this.db.prepare("DELETE FROM stream_vec WHERE id=?");
+    return this.db.transaction(() => {
+      let n = 0;
+      for (const id of ids) {
+        delFts.run(id); delVec.run(id); n += delBase.run(id).changes;
+      }
+      return n;
+    })();
   }
 
   // ─── T1 Atoms ─────────────────────────────────────────────────────────────
@@ -168,20 +192,23 @@ export class Falda {
       : typeof a.background === "string" ? a.background
       : typeof a.background === "object" ? JSON.stringify(a.background)
       : String(a.background);
+    const embedding = this.vecBuf(await this.embed(a.content));
     const exists = this.db.prepare("SELECT created_at FROM atoms WHERE id=?").get(id) as any;
     const created = exists?.created_at ?? now;
-    if (exists) {
-      this.db.prepare("UPDATE atoms SET type=?,content=?,background=?,updated_at=? WHERE id=?")
-        .run(a.type ?? "fact", a.content, bg, now, id);
+    this.db.transaction(() => {
+      if (exists) {
+        this.db.prepare("UPDATE atoms SET type=?,content=?,background=?,updated_at=? WHERE id=?")
+          .run(a.type ?? "fact", a.content, bg, now, id);
+      } else {
+        this.db.prepare("INSERT INTO atoms(id,type,content,background,created_at,updated_at) VALUES(?,?,?,?,?,?)")
+          .run(id, a.type ?? "fact", a.content, bg, created, now);
+      }
+      // Delete auxiliary entries even if an old release left them orphaned.
       this.db.prepare("DELETE FROM atoms_fts WHERE id=?").run(id);
       this.db.prepare("DELETE FROM atoms_vec WHERE id=?").run(id);
-    } else {
-      this.db.prepare("INSERT INTO atoms(id,type,content,background,created_at,updated_at) VALUES(?,?,?,?,?,?)")
-        .run(id, a.type ?? "fact", a.content, bg, created, now);
-    }
-    this.db.prepare("INSERT INTO atoms_fts(content,id) VALUES(?,?)").run(a.content, id);
-    this.db.prepare("INSERT INTO atoms_vec(id,embedding) VALUES(?,?)")
-      .run(id, this.vecBuf(await this.embed(a.content)));
+      this.db.prepare("INSERT INTO atoms_fts(content,id) VALUES(?,?)").run(a.content, id);
+      this.db.prepare("INSERT INTO atoms_vec(id,embedding) VALUES(?,?)").run(id, embedding);
+    })();
     return { id, type: a.type ?? "fact", content: a.content, background: bg, created_at: created, updated_at: now };
   }
 
@@ -203,20 +230,60 @@ export class Falda {
   }
 
   deleteAtoms(ids: string[]): number {
-    let n = 0;
-    const del = this.db.prepare("DELETE FROM atoms WHERE id=?");
-    for (const id of ids) n += del.run(id).changes;
-    return n;
+    const unique = [...new Set(ids)];
+    const delBase = this.db.prepare("DELETE FROM atoms WHERE id=?");
+    const delFts = this.db.prepare("DELETE FROM atoms_fts WHERE id=?");
+    const delVec = this.db.prepare("DELETE FROM atoms_vec WHERE id=?");
+    return this.db.transaction(() => {
+      let n = 0;
+      for (const id of unique) {
+        delFts.run(id); delVec.run(id); n += delBase.run(id).changes;
+      }
+      return n;
+    })();
   }
 
   // ─── T2 Scenes (local FS) ─────────────────────────────────────────────────
   private sceneBase() { const b = path.join(this.blobDir, "scenes"); fs.mkdirSync(b, { recursive: true }); return b; }
+
+  private scenePath(p: string): string {
+    if (!p || p.includes("\\") || p.includes("\0") || path.isAbsolute(p))
+      throw new Error("invalid scene path");
+    const base = fs.realpathSync(this.sceneBase());
+    const parts = p.split("/");
+    if (parts.some((part) => !part || part === "." || part === ".."))
+      throw new Error("invalid scene path");
+    let current = base;
+    for (let i = 0; i < parts.length - 1; i++) {
+      current = path.join(current, parts[i]);
+      if (fs.existsSync(current)) {
+        const real = fs.realpathSync(current);
+        if (!real.startsWith(base + path.sep)) throw new Error("invalid scene path");
+        current = real;
+      }
+    }
+    const fp = path.resolve(current, parts[parts.length - 1]);
+    if (!fp.startsWith(base + path.sep)) throw new Error("invalid scene path");
+    // lstat sees dangling symlinks that existsSync intentionally reports false.
+    try {
+      const st = fs.lstatSync(fp);
+      if (st.isSymbolicLink()) throw new Error("invalid scene path");
+    } catch (e: any) {
+      if (e?.code !== "ENOENT") throw e;
+    }
+    if (fs.existsSync(fp)) {
+      const real = fs.realpathSync(fp);
+      if (!real.startsWith(base + path.sep)) throw new Error("invalid scene path");
+    }
+    return fp;
+  }
 
   listScenes(prefix = ""): { entries: SceneEntry[]; total: number } {
     const base = this.sceneBase();
     const walk = (dir: string): string[] =>
       fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
         const fp = path.join(dir, e.name);
+        if (e.isSymbolicLink()) return [];
         return e.isDirectory() ? walk(fp) : [fp];
       });
     const entries = walk(base).map((fp) => path.relative(base, fp))
@@ -229,29 +296,47 @@ export class Falda {
   }
 
   readScene(p: string): string | null {
-    const fp = path.join(this.sceneBase(), p);
+    const fp = this.scenePath(p);
     return fs.existsSync(fp) ? fs.readFileSync(fp, "utf8") : null;
   }
 
   writeScene(p: string, content: string): void {
-    const fp = path.join(this.sceneBase(), p);
+    const fp = this.scenePath(p);
     fs.mkdirSync(path.dirname(fp), { recursive: true });
     fs.writeFileSync(fp, content, "utf8");
   }
 
   removeScene(p: string): void {
-    const fp = path.join(this.sceneBase(), p);
+    const fp = this.scenePath(p);
     if (fs.existsSync(fp)) fs.unlinkSync(fp);
   }
 
   // ─── T3 Core (local FS) ───────────────────────────────────────────────────
-  readCore(): string {
+  private corePath(): string {
     const fp = path.join(this.blobDir, "core.md");
+    try {
+      const st = fs.lstatSync(fp);
+      if (st.isSymbolicLink() || !st.isFile()) throw new Error("invalid core path");
+    } catch (e: any) {
+      if (e?.code !== "ENOENT") throw e;
+    }
+    return fp;
+  }
+
+  readCore(): string {
+    const fp = this.corePath();
     return fs.existsSync(fp) ? fs.readFileSync(fp, "utf8") : "";
   }
 
   writeCore(content: string): void {
-    fs.writeFileSync(path.join(this.blobDir, "core.md"), content, "utf8");
+    const fp = this.corePath();
+    const tmp = path.join(this.blobDir, `.core.${process.pid}.${randomUUID()}.tmp`);
+    try {
+      fs.writeFileSync(tmp, content, { encoding: "utf8", flag: "wx", mode: 0o600 });
+      fs.renameSync(tmp, fp);
+    } finally {
+      if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+    }
   }
 
   // ─── Hybrid recall: dense (sqlite-vec) + lexical (FTS5 BM25), RRF-fused ────
@@ -270,9 +355,9 @@ export class Falda {
     const cols = kind === "stream"
       ? "id,role,content,ts AS timestamp"
       : "id,type,content,background,created_at,updated_at";
-    return top.map(([id, s]) => {
+    return top.flatMap(([id, s]) => {
       const row = this.db.prepare(`SELECT ${cols} FROM ${kind} WHERE id=?`).get(id) as any;
-      return { ...row, score: s };
+      return row ? [{ ...row, score: s }] : [];
     });
   }
 
