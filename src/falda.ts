@@ -117,14 +117,24 @@ export class Falda {
     const ins = this.db.prepare("INSERT INTO stream(id,session_id,role,content,ts) VALUES(?,?,?,?,?)");
     const insF = this.db.prepare("INSERT INTO stream_fts(content,id) VALUES(?,?)");
     const insV = this.db.prepare("INSERT INTO stream_vec(id,embedding) VALUES(?,?)");
-    for (const m of items) {
-      const id = m.id ?? randomUUID();
-      const ts = m.timestamp ?? new Date().toISOString();
-      ins.run(id, sessionId, m.role, m.content, ts);
-      insF.run(m.content, id);
-      insV.run(id, this.vecBuf(await this.embed(m.content)));
-      ids.push(id);
-    }
+    // Resolve every external embedding before mutating local state. If the
+    // embedder fails midway through a batch, callers get an error and FALDA
+    // leaves no partially committed stream rows behind.
+    const prepared = await Promise.all(items.map(async (m) => ({
+      id: m.id ?? randomUUID(),
+      ts: m.timestamp ?? new Date().toISOString(),
+      item: m,
+      embedding: this.vecBuf(await this.embed(m.content)),
+    })));
+    const commit = this.db.transaction(() => {
+      for (const p of prepared) {
+        ins.run(p.id, sessionId, p.item.role, p.item.content, p.ts);
+        insF.run(p.item.content, p.id);
+        insV.run(p.id, p.embedding);
+        ids.push(p.id);
+      }
+    });
+    commit();
     return ids;
   }
 
@@ -168,20 +178,24 @@ export class Falda {
       : typeof a.background === "string" ? a.background
       : typeof a.background === "object" ? JSON.stringify(a.background)
       : String(a.background);
+    const embedding = this.vecBuf(await this.embed(a.content));
     const exists = this.db.prepare("SELECT created_at FROM atoms WHERE id=?").get(id) as any;
     const created = exists?.created_at ?? now;
-    if (exists) {
-      this.db.prepare("UPDATE atoms SET type=?,content=?,background=?,updated_at=? WHERE id=?")
-        .run(a.type ?? "fact", a.content, bg, now, id);
-      this.db.prepare("DELETE FROM atoms_fts WHERE id=?").run(id);
-      this.db.prepare("DELETE FROM atoms_vec WHERE id=?").run(id);
-    } else {
-      this.db.prepare("INSERT INTO atoms(id,type,content,background,created_at,updated_at) VALUES(?,?,?,?,?,?)")
-        .run(id, a.type ?? "fact", a.content, bg, created, now);
-    }
-    this.db.prepare("INSERT INTO atoms_fts(content,id) VALUES(?,?)").run(a.content, id);
-    this.db.prepare("INSERT INTO atoms_vec(id,embedding) VALUES(?,?)")
-      .run(id, this.vecBuf(await this.embed(a.content)));
+    const commit = this.db.transaction(() => {
+      if (exists) {
+        this.db.prepare("UPDATE atoms SET type=?,content=?,background=?,updated_at=? WHERE id=?")
+          .run(a.type ?? "fact", a.content, bg, now, id);
+        this.db.prepare("DELETE FROM atoms_fts WHERE id=?").run(id);
+        this.db.prepare("DELETE FROM atoms_vec WHERE id=?").run(id);
+      } else {
+        this.db.prepare("INSERT INTO atoms(id,type,content,background,created_at,updated_at) VALUES(?,?,?,?,?,?)")
+          .run(id, a.type ?? "fact", a.content, bg, created, now);
+      }
+      this.db.prepare("INSERT INTO atoms_fts(content,id) VALUES(?,?)").run(a.content, id);
+      this.db.prepare("INSERT INTO atoms_vec(id,embedding) VALUES(?,?)")
+        .run(id, embedding);
+    });
+    commit();
     return { id, type: a.type ?? "fact", content: a.content, background: bg, created_at: created, updated_at: now };
   }
 
